@@ -20,11 +20,12 @@ class IRCConnection(object):
     """
     # a couple handy regexes for reading text
     nick_re = re.compile('.*?Nickname is already in use')
+    nick_change_re = re.compile(':(?P<old_nick>.*?)!\S+\s+?NICK\s+:\s*(?P<new_nick>[-\w]+)')
     ping_re = re.compile('^PING (?P<payload>.*)')
-    chanmsg_re = re.compile(':(?P<nick>.*?)!\S+\s+?PRIVMSG\s+#(?P<channel>[-\w]+)\s+:(?P<message>[^\n\r]+)')
+    chanmsg_re = re.compile(':(?P<nick>.*?)!\S+\s+?PRIVMSG\s+(?P<channel>#+[-\w]+)\s+:(?P<message>[^\n\r]+)')
     privmsg_re = re.compile(':(?P<nick>.*?)!~\S+\s+?PRIVMSG\s+[^#][^:]+:(?P<message>[^\n\r]+)')
-    part_re = re.compile(':(?P<nick>.*?)!\S+\s+?PART\s+#(?P<channel>[-\w]+)')
-    join_re = re.compile(':(?P<nick>.*?)!\S+\s+?JOIN\s+:\s*#(?P<channel>[-\w]+)')
+    part_re = re.compile(':(?P<nick>.*?)!\S+\s+?PART\s+(?P<channel>#+[-\w]+)')
+    join_re = re.compile(':(?P<nick>.*?)!\S+\s+?JOIN\s+:\s*(?P<channel>#+[-\w]+)')
     quit_re = re.compile(':(?P<nick>.*?)!\S+\s+?QUIT\s+.*')
     registered_re = re.compile(':(?P<server>.*?)\s+(?:376|422)')
     
@@ -104,22 +105,26 @@ class IRCConnection(object):
         self.send('USER %s %s bla :%s' % (self.nick, self.server, self.nick), True)
 
     def join(self, channel):
-        channel = channel.lstrip('#')
-        self.send('JOIN #%s' % channel)
-        self.logger.debug('joining #%s' % channel)
+        if not channel.startswith('#'):
+            channel = '#%s' % channel
+        self.send('JOIN %s' % channel)
+        self.logger.debug('joining %s' % channel)
 
     def part(self, channel):
-        channel = channel.lstrip('#')
-        self.send('PART #%s' % channel)
-        self.logger.debug('leaving #%s' % channel)
-    
+        if not channel.startswith('#'):
+            channel = '#%s' % channel
+        self.send('PART %s' % channel)
+        self.logger.debug('leaving %s' % channel)
+
     def respond(self, message, channel=None, nick=None):
         """\
         Multipurpose method for sending responses to channel or via message to
         a single user
         """
         if channel:
-            self.send('PRIVMSG #%s :%s' % (channel.lstrip('#'), message))
+            if not channel.startswith('#'):
+                channel = '#%s' % channel
+            self.send('PRIVMSG %s :%s' % (channel, message))
         elif nick:
             self.send('PRIVMSG %s :%s' % (nick, message))
     
@@ -137,6 +142,7 @@ class IRCConnection(object):
         """
         return (
             (self.nick_re, self.new_nick),
+            (self.nick_change_re, self.handle_nick_change),
             (self.ping_re, self.handle_ping),
             (self.part_re, self.handle_part),
             (self.join_re, self.handle_join),
@@ -161,7 +167,13 @@ class IRCConnection(object):
         self.nick = '%s_%s' % (self.base_nick, random.randint(1, 1000))
         self.logger.warn('Nick %s already taken, trying %s' % (old, self.nick))
         self.register_nick()
-    
+        self.handle_nick_change(old, self.nick)
+
+    def handle_nick_change(self, old_nick, new_nick):
+        for pattern, callback in self._callbacks:
+            if pattern.match('/nick'):
+                callback(old_nick, '/nick', new_nick)
+
     def handle_ping(self, payload):
         """\
         Respond to periodic PING messages from server
@@ -200,7 +212,7 @@ class IRCConnection(object):
         results = []
         
         for pattern, callback in self._callbacks:
-            match = pattern.match(message)
+            match = pattern.match(message) or pattern.match('/privmsg')
             if match:
                 results.append(callback(nick, message, channel, **match.groupdict()))
         
